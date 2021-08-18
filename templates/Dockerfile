@@ -4,12 +4,8 @@ WORKDIR /jetskulls
 {% set tmp_file = type + '.tmp' %}
 {% set desk_dir = '/root/Desktop/' %}
 
-{% if download.startswith('http:') or download.startswith('https:') %}
-RUN wget -O {{ tmp_file }} '{{ download }}' \
-{% else %}
-COPY '{{ download }}' {{ tmp_file }}
+COPY '{{ cache_file }}' {{ tmp_file }}
 RUN echo use '{{ download }}' \
-{% endif %}
 {% if '.tgz' in download or '.tar.gz' in download %}
     && tar xzvf {{ tmp_file }} \
 {% elif '.zip' in download %}
