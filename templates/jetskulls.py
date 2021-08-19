@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from functools import wraps
 from getopt import (
     getopt,
     GetoptError,
@@ -27,6 +28,7 @@ CACHE_DIR = os.path.join(os.environ['HOME'], '.jetskulls')
 IMAGE_PARENTS = 'image_parents'
 LOCK_FILE = 'lock'
 DEFAULT_WEB_PORT = 6080
+V0 = 'v0'
 
 
 class SnapshotError(Exception):
@@ -42,40 +44,60 @@ def download_file(url, save_dir):
     name = sha256(b_url).hexdigest()
     file_path = os.path.join(save_dir, name)
     if os.path.isfile(file_path):
-        return file_path
+        return name
 
     try:
         check_call(['wget', '-O', file_path, url])
     except CalledProcessError:
         pass
     else:
-        return file_path
+        return name
 
     try:
         check_call(['curl', '-o', file_path, url])
     except CalledProcessError:
         os.remove(file_path)
         raise
-    return file_path
+    return name
+
+
+class Lock(object):
+
+    LOCK_DIR = CACHE_DIR
+
+    def __init__(self):
+        self._fd = None
+
+    def acquire(self):
+        file_path = os.path.join(self.LOCK_DIR, LOCK_FILE)
+        self._fd = open(file_path, 'w')
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+
+    def release(self):
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        self._fd.close()
+        self._fd = None
+
+    @classmethod
+    def check(cls, func):
+
+        @wraps(func)
+        def _wrapped(*args, **kwargs):
+            lock = cls()
+            lock.acquire()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                lock.release()
+
+        return _wrapped
 
 
 class Ide(object):
 
-    def __init__(self, ide_config, user_config, cache_dir):
+    def __init__(self, ide_config, cache_dir):
         self._ide_config = ide_config
-        self._user_config = user_config
         self._cache_dir = cache_dir
-        self._lock_fd = None
-
-    def _lock(self):
-        file_path = os.path.join(self._cache_dir, LOCK_FILE)
-        self._lock_fd = open(file_path, 'w')
-        fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
-
-    def _unlock(self):
-        fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-        self._lock_fd.close()
-        self._lock_fd = None
 
     def _repo_name(self):
         return 'jetskulls-%s' % self._ide_config['type']
@@ -96,14 +118,18 @@ class Ide(object):
         output = ensure_str(output)
         return output.strip().split(':')[-1]
 
+    def is_running(self):
+        return bool(self._running_image_tag())
+
     def list_snapshots(self):
-        cmd = r'docker images %s:* | tail +2 | awk "{print $2}"' % self._repo_name()
+        cmd = r"docker images %s:* | tail +2 | awk '{print $2}'" % self._repo_name()
         output = check_output(cmd, shell=True)
         output = ensure_str(output).strip()
         if not output:
             return []
         return output.split('\n')
 
+    @Lock.check
     def take_snapshot(self, snapshot_name):
         repo = self._repo_name()
         con = self._container_name()
@@ -119,49 +145,43 @@ class Ide(object):
         cmd = ['docker', 'commit', con, '%s:%s' % (repo, snapshot_name)]
         check_call(cmd)
 
-        self._lock()
-        try:
+        if not os.path.isfile(pf):
+            data = {}
+        else:
             with open(pf, 'r') as fd:
                 data = json.load(fd)
-            data[snapshot_name] = parent_snapshot
-            content = json.dumps(data, indent=1)
-            with open(pf, 'w') as fd:
-                fd.write(content)
-        finally:
-            self._unlock()
+        data[snapshot_name] = parent_snapshot
+        content = json.dumps(data, indent=1)
+        with open(pf, 'w') as fd:
+            fd.write(content)
 
+    @Lock.check
     def remove_snapshot(self, snapshot_name):
         pf = self._parents_file()
         running = self._running_image_tag()
         if running == snapshot_name:
             raise SnapshotError('Ide is running on this snapshot, can not remove the snapshot!')
 
-        self._lock()
-        try:
+        if not os.path.isfile(pf):
+            data = {}
+        else:
             with open(pf, 'r') as fd:
                 data = json.load(fd)
-            for k_, v_ in data.items():
-                if v_ == snapshot_name:
-                    raise SnapshotError(
-                        '%s is referenced by %s, can not remove it!' % (v_, k_))
-        finally:
-            self._unlock()
+        for k_, v_ in data.items():
+            if v_ == snapshot_name:
+                raise SnapshotError(
+                    '%s is referenced by %s, can not remove it!' % (v_, k_))
 
         cmd = ['docker', 'rmi', '-f', '%s:%s' % (self._repo_name(), snapshot_name)]
         check_call(cmd)
 
-        self._lock()
-        try:
-            with open(pf, 'r') as fd:
-                data = json.load(fd)
-            data.pop(snapshot_name, None)
-            content = json.dumps(data, indent=1)
-            with open(pf, 'w') as fd:
-                fd.write(content)
-        finally:
-            self._unlock()
+        data.pop(snapshot_name, None)
+        content = json.dumps(data, indent=1)
+        with open(pf, 'w') as fd:
+            fd.write(content)
 
-    def start(self, snapshot_name):
+    @Lock.check
+    def start(self, snapshot_name, user_config):
         running = self._running_image_tag()
         if running and running != snapshot_name:
             raise IdeError('Ide is running on another snapshot[%s], stop the ide first.' % running)
@@ -173,14 +193,14 @@ class Ide(object):
             'docker', 'run', '-d',
             '--name', self._container_name(),
             '-v', '/dev/shm:/dev/shm',
-            '-p', '%s:80' % self._user_config.get('web_port', DEFAULT_WEB_PORT),
+            '-p', '%s:80' % user_config.get('web_port', DEFAULT_WEB_PORT),
         ]
 
-        vnc_port = self._user_config.get('vnc_port')  # optional
+        vnc_port = user_config.get('vnc_port')  # optional
         if vnc_port:
             cmd += ['-p', '%s:5900' % vnc_port]
 
-        for item in self._user_config['mount'].strip().split(','):
+        for item in user_config['mount'].strip().split(','):
             if ':' not in item:
                 raise ValueError('Invalid mount map: %s' % item)
             cmd += ['-v', item]
@@ -189,6 +209,7 @@ class Ide(object):
         cmd.append(target_image)
         check_call(cmd)
 
+    @Lock.check
     def stop(self):
         if not self._running_image_tag():
             return
@@ -208,66 +229,107 @@ class JetSkulls(object):
         with open(file_name, 'r') as fd:
             return json.load(fd)
 
+    @Lock.check
     def build_ide(self, ide_type):
         ide_config = self._load_ide_config(ide_type)
-        if 'v0' in Ide(ide_config, {}, self._cache_dir).list_snapshots():
+        if V0 in Ide(ide_config, self._cache_dir).list_snapshots():
             return
 
-        file_path = download_file(ide_config['download'], self._cache_dir)
-        ide_config['cache_file'] = file_path
+        file_name = download_file(ide_config['download'], self._cache_dir)
+        ide_config['cache_file'] = file_name
         td = gettempdir()
 
         dockerfile = os.path.join(td, 'Dockerfile')
+        with open('templates/Dockerfile', 'r') as fd:
+            tmpl_src = fd.read()
         with open(dockerfile, 'w') as fd:
-            tp = jinja2.Template('templates/Dockerfile')
+            tp = jinja2.Template(tmpl_src)
             content = tp.render(**ide_config)
             fd.write(content)
 
-        image_name = 'jetskulls-%s:v0' % ide_type
-        check_call(['docker', 'build', '-f', dockerfile, '-t', image_name, '.'])
+        image_name = 'jetskulls-%s:%s' % (ide_type, V0)
+        check_call(['docker', 'build', '-f', dockerfile, '-t', image_name, self._cache_dir])
 
-    def get_ide(self, ide_type, user_config):
+    def get_ide(self, ide_type):
         ide_config = self._load_ide_config(ide_type)
-        return Ide(ide_config, user_config, self._cache_dir)
+        return Ide(ide_config, self._cache_dir)
+
+
+def ide_ps(ide):
+    if ide.is_running():
+        print('ide is running.')
+    else:
+        print('ide is not running!')
 
 
 def ide_ls(ide):
-    pass
+    for name in ide.list_snapshots():
+        print(name)
 
 
-def ide_snapshot(ide):
-    pass
+def ide_snapshot(ide, snapshot_name):
+    print('snapshotting...')
+    ide.take_snapshot(snapshot_name)
+    print('snapshot %s done.' % snapshot_name)
 
 
-def ide_start(ide):
-    pass
+def ide_start(ide, snapshot_name, user_config):
+    print('starting...')
+    ide.start(snapshot_name, user_config)
+    print('ide started from snapshot %s.' % snapshot_name)
 
 
 def ide_stop(ide):
-    pass
+    print('stopping...')
+    ide.stop()
+    print('ide stopped.')
 
 
-_ide_op_map = {
-    'ls':       ide_ls,
-    'snapshot': ide_snapshot,
-    'start':    ide_start,
-    'stop':     ide_stop,
-}
+def build_ide(ide_type):
+    print('building for %s...' % ide_type)
+    JetSkulls().build_ide(ide_type)
+    print('ide_type %s ready!' % ide_type)
+
+
+def usage():
+    head = sys.argv[0]
+    sys.stderr.writelines([
+        'Usage: \n',
+        '  %s build <IDE-TYPE>                          build the first snapshot for some ide type.\n' % head,
+        '                                               the first snapshot name will be "%s"\n\n' % V0,
+        '  %s <IDE-TYPE> ls                             list snapshots of this ide type.\n\n' % head,
+        '  %s <IDE-TYPE> ps                             check if ide is running.\n\n' % head,
+        '  %s <IDE-TYPE> snapshot <SNAPSHOT-NAME>       take snapshot for current ide.\n\n' % head,
+        '  %s <IDE-TYPE> start <ARGS> <SNAPSHOT-NAME>   start a ide from one snapshot.\n' % head,
+        '    <ARGS> =\n'
+        '    --web-port <PORT>          web port for user to view at. will be 6080 if omitted.\n',
+        '    --vnc-port <PORT>          vnc port for user to view by vnc-viewer. wont be used if omitted.\n',
+        '    --mount <PATH-MAPS>        this is required! this is the same as -v of docker run.\n',
+        '                               use , to separate multiple maps. e.g. /dev:/dev,/home:/home:ro \n\n',
+        '  %s <IDE-TYPE> stop                           stop current ide.\n\n' % head,
+    ])
 
 
 def parse_and_run():
     if sys.argv[1] == 'build':
-        ide_type = sys.argv[2]
-        JetSkulls().build_ide(ide_type)
+        build_ide(sys.argv[2])
     else:
         ide_type = sys.argv[1]
         op = sys.argv[2]
 
-        if op != 'start':
-            ide = JetSkulls().get_ide(ide_type, {})
-        else:
+        ide = JetSkulls().get_ide(ide_type)
+
+        if op == 'ps':
+            ide_ps(ide)
+        elif op == 'ls':
+            ide_ls(ide)
+        elif op == 'snapshot':
+            ide_snapshot(ide, sys.argv[3])
+        elif op == 'stop':
+            ide_stop(ide)
+        elif op == 'start':
             args = sys.argv[3:]
-            pairs, _ = getopt(args, '', ['web-port=', 'vnc-port=', 'mount='])
+            pairs, others = getopt(args, '', ['web-port=', 'vnc-port=', 'mount='])
             arg_map = dict(pairs)
             user_config = {}
             if '--web-port' in arg_map:
@@ -277,14 +339,15 @@ def parse_and_run():
             if '--mount' not in arg_map:
                 raise IndexError()
             user_config['mount'] = arg_map['--mount']
-            ide = JetSkulls().get_ide(ide_type, user_config)
-
-        func = _ide_op_map.get(op)
-        if func is None:
-            raise IndexError()
-
-        func(ide)
+            ide_start(ide, others[0], user_config)
 
 
 if __name__ == '__main__':
-    parse_and_run()
+    try:
+        parse_and_run()
+    except (IdeError, SnapshotError) as ex:
+        sys.stderr.write(str(ex))
+        sys.exit(1)
+    except (IndexError, KeyError, GetoptError):
+        usage()
+        sys.exit(1)
