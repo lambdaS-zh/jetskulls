@@ -3,7 +3,6 @@ import fcntl
 import json
 import os
 import sys
-from collections import defaultdict
 from functools import wraps
 from getopt import (
     getopt,
@@ -24,9 +23,9 @@ from tempfile import gettempdir
 import jinja2
 
 
-CACHE_DIR = os.path.join(os.environ['HOME'], '.jetskulls')
+CACHE_DIR = os.path.join('.', '.jetskulls')
 IMAGE_PARENTS = 'image_parents'
-LOCK_FILE = 'lock'
+LOCK_FILE = os.path.join(gettempdir(), 'jetskulls-lock')
 DEFAULT_WEB_PORT = 6080
 V0 = 'v0'
 
@@ -63,13 +62,11 @@ def download_file(url, save_dir):
 
 class Lock(object):
 
-    LOCK_DIR = CACHE_DIR
-
     def __init__(self):
         self._fd = None
 
     def acquire(self):
-        file_path = os.path.join(self.LOCK_DIR, LOCK_FILE)
+        file_path = LOCK_FILE
         self._fd = open(file_path, 'w')
         fcntl.flock(self._fd, fcntl.LOCK_EX)
 
@@ -237,9 +234,8 @@ class JetSkulls(object):
 
         file_name = download_file(ide_config['download'], self._cache_dir)
         ide_config['cache_file'] = file_name
-        td = gettempdir()
 
-        dockerfile = os.path.join(td, 'Dockerfile')
+        dockerfile = 'Dockerfile'
         with open('templates/Dockerfile', 'r') as fd:
             tmpl_src = fd.read()
         with open(dockerfile, 'w') as fd:
@@ -248,7 +244,10 @@ class JetSkulls(object):
             fd.write(content)
 
         image_name = 'jetskulls-%s:%s' % (ide_type, V0)
-        check_call(['docker', 'build', '-f', dockerfile, '-t', image_name, self._cache_dir])
+        try:
+            check_call(['docker', 'build', '-f', dockerfile, '-t', image_name, self._cache_dir])
+        finally:
+            os.remove(dockerfile)
 
     def get_ide(self, ide_type):
         ide_config = self._load_ide_config(ide_type)
