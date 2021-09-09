@@ -1,0 +1,6 @@
+{
+    "type":         "webstorm",
+    "download":     "https://download.jetbrains.com/webstorm/WebStorm-2021.2.1.tar.gz",
+    "ide_launcher": "webstorm.sh"
+}
+

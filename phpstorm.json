@@ -1,0 +1,6 @@
+{
+    "type":         "phpstorm",
+    "download":     "https://download.jetbrains.com/webide/PhpStorm-2021.2.1.tar.gz",
+    "ide_launcher": "phpstorm.sh"
+}
+

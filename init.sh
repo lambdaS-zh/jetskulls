@@ -1,5 +1,8 @@
 #!/bin/sh
-mkdir -p ~/.jetskulls
+
+if [ ! -e .jetskulls ]; then
+    mkdir .jetskulls
+fi
 
 if [ -n "$(which python)" ]; then
     py_bin="$(which python)"

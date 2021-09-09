@@ -1,0 +1,6 @@
+{
+    "type":         "rubymine",
+    "download":     "https://download.jetbrains.com/ruby/RubyMine-2021.2.1.tar.gz",
+    "ide_launcher": "rubymine.sh"
+}
+

@@ -26,6 +26,7 @@ import jinja2
 CACHE_DIR = os.path.join('.', '.jetskulls')
 IMAGE_PARENTS = 'image_parents'
 LOCK_FILE = os.path.join(gettempdir(), 'jetskulls-lock')
+INNER_SRC_DIR = '/root/Desktop/src'
 DEFAULT_WEB_PORT = 6080
 V0 = 'v0'
 
@@ -197,7 +198,21 @@ class Ide(object):
         if vnc_port:
             cmd += ['-p', '%s:5900' % vnc_port]
 
-        for item in user_config['mount'].strip().split(','):
+        web_password = user_config.get('web_password')  # optional
+        if web_password:
+            cmd += ['-e', 'HTTP_PASSWORD=%s' % web_password]
+
+        vnc_password = user_config.get('vnc_password')  # optional
+        if vnc_password:
+            cmd += ['-e', 'VNC_PASSWORD=%s' % vnc_password]
+
+        mounts = user_config.get('mount')  # optional
+        if mounts is None:
+            src_dir = os.path.join(os.getcwd(), 'src', self._ide_config['type'])
+            if not os.path.isdir(src_dir):
+                os.makedirs(src_dir)
+            mounts = '%s:%s' % (src_dir, INNER_SRC_DIR)
+        for item in mounts.strip().split(','):
             if ':' not in item:
                 raise ValueError('Invalid mount map: %s' % item)
             cmd += ['-v', item]
@@ -302,8 +317,10 @@ def usage():
         '  %s <IDE-TYPE> start <ARGS> <SNAPSHOT-NAME>   start a ide from one snapshot.\n' % head,
         '    <ARGS> =\n'
         '    --web-port <PORT>          web port for user to view at. will be 6080 if omitted.\n',
+        '    --web-password <PASSWORD>  can be omitted.\n',
         '    --vnc-port <PORT>          vnc port for user to view by vnc-viewer. wont be used if omitted.\n',
-        '    --mount <PATH-MAPS>        this is required! this is the same as -v of docker run.\n',
+        '    --vnc-password <PASSWORD>  can be omitted.\n',
+        '    --mount <PATH-MAPS>        this is the same as -v of docker run. will be src/<IDE-TYPE>/:%s if omitted. \n' % INNER_SRC_DIR,
         '                               use , to separate multiple maps. e.g. /dev:/dev,/home:/home:ro \n\n',
         '  %s <IDE-TYPE> stop                           stop current ide.\n\n' % head,
     ])
@@ -328,16 +345,19 @@ def parse_and_run():
             ide_stop(ide)
         elif op == 'start':
             args = sys.argv[3:]
-            pairs, others = getopt(args, '', ['web-port=', 'vnc-port=', 'mount='])
+            pairs, others = getopt(args, '', ['web-port=', 'web-password=', 'vnc-port=', 'vnc-password=', 'mount='])
             arg_map = dict(pairs)
             user_config = {}
             if '--web-port' in arg_map:
                 user_config['web_port'] = arg_map['--web-port']
+            if '--web-password' in arg_map:
+                user_config['web_password'] = arg_map['--web-password']
             if '--vnc-port' in arg_map:
                 user_config['vnc_port'] = arg_map['--vnc-port']
-            if '--mount' not in arg_map:
-                raise IndexError()
-            user_config['mount'] = arg_map['--mount']
+            if '--vnc-password' in arg_map:
+                user_config['vnc_password'] = arg_map['--vnc-password']
+            if '--mount' in arg_map:
+                user_config['mount'] = arg_map['--mount']
             ide_start(ide, others[0], user_config)
 
 

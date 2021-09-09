@@ -1,0 +1,6 @@
+{
+    "type":         "clion",
+    "download":     "https://download.jetbrains.com/cpp/CLion-2021.2.1.tar.gz",
+    "ide_launcher": "clion.sh"
+}
+
